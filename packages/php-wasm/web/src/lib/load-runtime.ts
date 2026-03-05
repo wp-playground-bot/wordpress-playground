@@ -137,22 +137,26 @@ export async function loadWebRuntime(
 interface WasmRefs {
 	memory: WebAssembly.Memory | null;
 	malloc: ((size: number) => number) | null;
+	// Late-bound reference to the Emscripten module. Set via
+	// onRuntimeInitialized, used by polyfillJsModuleOnMessage
+	// to forward non-request messages to onMessage listeners.
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	module: any;
 }
 
 function wrapInstantiateWasmForPolyfill(
 	options: EmscriptenOptions
 ): EmscriptenOptions {
-	const wasmRefs: WasmRefs = { memory: null, malloc: null };
-	const originalInstantiateWasm = options.instantiateWasm;
-	if (!originalInstantiateWasm) {
-		throw new Error(
-			'JSPI polyfill requires emscriptenOptions.instantiateWasm. ' +
-				'Provide a custom instantiateWasm hook so the polyfill ' +
-				'can intercept WASM imports before instantiation.'
-		);
-	}
+	const wasmRefs: WasmRefs = { memory: null, malloc: null, module: null };
+	const originalInstantiateWasm =
+		options.instantiateWasm ?? defaultInstantiateWasm;
+	const originalOnRuntimeInitialized = options.onRuntimeInitialized;
 	return {
 		...options,
+		onRuntimeInitialized(phpRuntime: unknown) {
+			wasmRefs.module = phpRuntime;
+			originalOnRuntimeInitialized?.call(this, phpRuntime);
+		},
 		instantiateWasm(
 			info: WebAssembly.Imports,
 			receiveInstance: (
@@ -161,17 +165,44 @@ function wrapInstantiateWasmForPolyfill(
 			) => void
 		) {
 			patchAsyncImports(info, wasmRefs);
-			return originalInstantiateWasm(info, (instance, module) => {
-				wasmRefs.memory = instance.exports[
-					'memory'
-				] as WebAssembly.Memory;
-				wasmRefs.malloc = instance.exports['malloc'] as (
-					n: number
-				) => number;
-				receiveInstance(instance, module);
-			});
+			return originalInstantiateWasm.call(
+				this,
+				info,
+				(
+					instance: WebAssembly.Instance,
+					module: WebAssembly.Module
+				) => {
+					wasmRefs.memory = instance.exports[
+						'memory'
+					] as WebAssembly.Memory;
+					wasmRefs.malloc = instance.exports['malloc'] as (
+						n: number
+					) => number;
+					receiveInstance(instance, module);
+				}
+			);
 		},
 	};
+}
+
+/**
+ * Default instantiateWasm for when no custom hook is provided.
+ * Uses the Emscripten Module's wasmBinary (set internally before
+ * this callback is invoked) to instantiate the WASM module.
+ */
+function defaultInstantiateWasm(
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	this: any,
+	info: WebAssembly.Imports,
+	receiveInstance: (
+		instance: WebAssembly.Instance,
+		module: WebAssembly.Module
+	) => void
+): Record<string, never> {
+	WebAssembly.instantiate(this.wasmBinary, info).then(
+		({ instance, module }) => receiveInstance(instance, module)
+	);
+	return {};
 }
 
 function patchAsyncImports(
@@ -180,6 +211,16 @@ function patchAsyncImports(
 ): void {
 	const env = info['env'] as Record<string, unknown> | undefined;
 	if (!env) return;
+
+	// Remove the Suspending polyfill now that
+	// instrumentWasmImports has already used it. Functions
+	// like _wasm_connect check 'Suspending' in WebAssembly
+	// to choose between sync/async paths. With the polyfill
+	// the async path breaks (handleAsync's await creates a
+	// real async gap WASM can't handle), so we need them to
+	// take their synchronous fallback instead.
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	delete (WebAssembly as any).Suspending;
 
 	if (typeof env['emscripten_sleep'] === 'function') {
 		env['emscripten_sleep'] = (ms: number) => {
@@ -198,10 +239,41 @@ function patchAsyncImports(
 		};
 	}
 
-	// wasm_recv / recv: route through sync XHR to service
-	// worker where the real TCPOverFetchWebSocket can read
-	// data. Both must be replaced — recv calls the original
-	// _wasm_recv JS function, not the WASM import.
+	// __syscall_recvfrom: Emscripten syscall backing libc
+	// recv()/recvfrom(). Curl calls recv() which goes here.
+	// The original reads from sock.recv_queue (populated by
+	// WebSocket onmessage), which is always empty for our
+	// PolyfillProxyWebSocket. Patch to use sync XHR instead.
+	// Handles MSG_PEEK via local buffering.
+	if (typeof env['__syscall_recvfrom'] === 'function') {
+		const originalRecvFrom = env['__syscall_recvfrom'] as (
+			...args: number[]
+		) => number;
+		env['__syscall_recvfrom'] = (
+			fd: number,
+			buf: number,
+			len: number,
+			flags: number,
+			addr: number,
+			addrlen: number
+		): number => {
+			return polyfillRecvFrom(
+				wasmRefs,
+				originalRecvFrom,
+				fd,
+				buf,
+				len,
+				flags,
+				addr,
+				addrlen
+			);
+		};
+	}
+
+	// wasm_recv / recv: PHP's socket layer calls wasm_recv
+	// (defined in phpwasm-emscripten-library.js) which
+	// internally polls __syscall_recvfrom. Replace with
+	// direct sync XHR recv via the same shared buffer.
 	const recvReplacement = (
 		sockfd: number,
 		buffer: number,
@@ -255,17 +327,10 @@ function patchAsyncImports(
 
 	// wasm_poll_socket: EM_ASYNC_JS function used by
 	// __wrap_select and php_pollfd_for to wait for socket
-	// events. Return 1 immediately so curl's select() sees
-	// the socket as ready; polyfillRecv handles the actual
-	// blocking when curl calls recv().
+	// events. Return 1 immediately — the actual blocking
+	// happens in polyfillRecvFrom when curl calls recv().
 	if (typeof env['__asyncjs__wasm_poll_socket'] === 'function') {
-		env['__asyncjs__wasm_poll_socket'] = (
-			_socketd: number,
-			_events: number,
-			_timeout: number
-		) => {
-			return 1;
-		};
+		env['__asyncjs__wasm_poll_socket'] = () => 1;
 	}
 
 	// js_module_onMessage: EM_ASYNC_JS function called by
@@ -324,6 +389,45 @@ function polyfillEmscriptenWgetData(
 	view.setInt32(perror, 0, true);
 }
 
+/**
+ * Local recv buffer per socket. Bridges MSG_PEEK (which
+ * reads without consuming) and normal recv. When data is
+ * fetched from the service worker it's stored here; peek
+ * reads leave it in place, normal reads consume it.
+ */
+const recvBuffers = new Map<number, Uint8Array>();
+
+/**
+ * Replacement for Emscripten's __syscall_recvfrom. Called
+ * by libc recv()/recvfrom() — this is curl's recv path.
+ */
+function polyfillRecvFrom(
+	wasmRefs: WasmRefs,
+	originalRecvFrom: (...args: number[]) => number,
+	fd: number,
+	buf: number,
+	len: number,
+	flags: number,
+	addr: number,
+	addrlen: number
+): number {
+	const socketId = PolyfillProxyWebSocket.sockfdToSocketId.get(fd);
+	if (socketId === undefined) {
+		return originalRecvFrom(fd, buf, len, flags, addr, addrlen);
+	}
+
+	const data = recvFromBuffer(socketId, len, flags);
+	if (data.length === 0) return 0;
+
+	const mem = new Uint8Array(wasmRefs.memory!.buffer);
+	mem.set(data, buf);
+	return data.length;
+}
+
+/**
+ * Replacement for wasm_recv (PHP's socket layer recv).
+ * Uses the same shared buffer as polyfillRecvFrom.
+ */
 function polyfillRecv(
 	wasmRefs: WasmRefs,
 	sockfd: number,
@@ -333,15 +437,54 @@ function polyfillRecv(
 	const socketId = PolyfillProxyWebSocket.sockfdToSocketId.get(sockfd);
 	if (socketId === undefined) return 0;
 
-	const response = sendSyncXhr('sock-recv', {
-		socketId,
-		maxSize: size,
-	});
-	if (!response.ok || response.data.length === 0) return 0;
+	const data = recvFromBuffer(socketId, size, 0);
+	if (data.length === 0) return 0;
 
 	const mem = new Uint8Array(wasmRefs.memory!.buffer);
-	mem.set(response.data, buffer);
-	return response.data.length;
+	mem.set(data, buffer);
+	return data.length;
+}
+
+/**
+ * Shared recv implementation. Checks the local buffer
+ * first, fetches from the service worker if empty.
+ * Handles MSG_PEEK (flag 2) by not consuming the buffer.
+ */
+function recvFromBuffer(
+	socketId: number,
+	maxSize: number,
+	flags: number
+): Uint8Array {
+	const MSG_PEEK = 2;
+	const isPeek = (flags & MSG_PEEK) !== 0;
+
+	let buffered = recvBuffers.get(socketId);
+	if (!buffered || buffered.length === 0) {
+		const response = sendSyncXhr('sock-recv', {
+			socketId,
+			maxSize,
+		});
+		if (!response.ok || response.data.length === 0) {
+			return new Uint8Array(0);
+		}
+		buffered = response.data;
+	}
+
+	const toRead = Math.min(maxSize, buffered.length);
+	const result = buffered.subarray(0, toRead);
+
+	if (isPeek) {
+		recvBuffers.set(socketId, buffered);
+	} else {
+		const remaining = buffered.subarray(toRead);
+		if (remaining.length > 0) {
+			recvBuffers.set(socketId, remaining);
+		} else {
+			recvBuffers.delete(socketId);
+		}
+	}
+
+	return result;
 }
 
 /**
@@ -359,6 +502,18 @@ function polyfillJsModuleOnMessage(
 	responseBufferPtr: number
 ): number {
 	const messageBytes = readCString(wasmRefs, dataPtr);
+
+	// Forward non-request messages to Module['onMessage']
+	// listeners. Messages like 'parallelize_request' are
+	// used by the prefetch optimization to capture update
+	// check requests. Without this, those listeners never
+	// fire because the polyfill bypasses the normal
+	// Module['onMessage'] call chain.
+	//
+	// 'request' type messages are handled exclusively by
+	// the service worker — forwarding them would cause
+	// duplicate fetches.
+	forwardToOnMessageListeners(wasmRefs, messageBytes);
 
 	// Send to service worker for processing.
 	const response = sendSyncXhr('msg', {}, messageBytes);
@@ -383,6 +538,33 @@ function polyfillJsModuleOnMessage(
 	view.setInt32(responseBufferPtr, ptr, true);
 
 	return totalLength;
+}
+
+function forwardToOnMessageListeners(
+	wasmRefs: WasmRefs,
+	messageBytes: Uint8Array
+): void {
+	const onMessage = wasmRefs.module?.onMessage;
+	if (typeof onMessage !== 'function') {
+		return;
+	}
+
+	const messageStr = new TextDecoder().decode(messageBytes);
+
+	let isRequest = false;
+	try {
+		isRequest = JSON.parse(messageStr).type === 'request';
+	} catch {
+		// Not JSON — forward to listeners.
+	}
+	if (isRequest) {
+		return;
+	}
+
+	// Fire-and-forget. The listeners for non-request
+	// messages (like 'parallelize_request') are synchronous
+	// capture callbacks that don't return meaningful data.
+	onMessage(messageStr).catch(() => {});
 }
 
 function readCString(wasmRefs: WasmRefs, ptr: number): Uint8Array {

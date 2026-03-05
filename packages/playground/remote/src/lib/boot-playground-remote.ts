@@ -122,9 +122,19 @@ export async function bootPlaygroundRemote() {
 
 	const workerUrl = new URL(getWorkerUrl(), origin) + '';
 
-	const phpWorkerApi = consumeAPI<PlaygroundWorkerEndpoint>(
-		await spawnPHPWorkerThread(workerUrl)
-	);
+	const worker = await spawnPHPWorkerThread(workerUrl);
+
+	// Forward tcpOverFetchOptions from the PHP worker to
+	// the service worker. CryptoKey objects are only
+	// structured-clonable via postMessage (not serializable),
+	// so we relay through the main thread.
+	worker.addEventListener('message', (event: MessageEvent) => {
+		if (event.data?.type === 'jspi-polyfill-options') {
+			navigator.serviceWorker.controller?.postMessage(event.data);
+		}
+	});
+
+	const phpWorkerApi = consumeAPI<PlaygroundWorkerEndpoint>(worker);
 
 	const wpFrame = document.querySelector('#wp') as HTMLIFrameElement;
 	const phpRemoteApi: WebClientMixin = {
@@ -311,7 +321,9 @@ export async function bootPlaygroundRemote() {
 			 *      the detailed context.
 			 */
 			const navigationComplete = new Promise<void>((resolve) => {
-				wpFrame.addEventListener('load', () => resolve(), { once: true });
+				wpFrame.addEventListener('load', () => resolve(), {
+					once: true,
+				});
 			});
 
 			// If the URL is the same, we need to force a reload
