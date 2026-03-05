@@ -8,9 +8,9 @@
  * - `WebAssembly.promising(fn)` return a wrapper that calls
  *   `fn` and wraps the result in `Promise.resolve()`.
  *
- * This works because the companion SAB-based import
- * replacements (Task 1.2) turn all async imports into
- * synchronous ones. With synchronous imports, the
+ * This works because the companion sync XHR import
+ * replacements in load-runtime.ts turn all async imports
+ * into synchronous ones. With synchronous imports, the
  * Emscripten `Asyncify.instrumentWasmImports()` wrapping
  * via `new WebAssembly.Suspending(fn)` becomes a no-op,
  * and `instrumentWasmExports()` wrapping via
