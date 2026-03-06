@@ -14,13 +14,19 @@ test('playground.cli() streams stdout', async ({ website }) => {
 		);
 	});
 
-	// Step 2: cli() + stdoutText
-	const output = await website.page.evaluate(async () => {
+	// Step 2: cli() — does it return at all?
+	await website.page.evaluate(async () => {
 		const response = await (window as any).playground.cli([
 			'php',
 			'/tmp/script.php',
 		]);
-		return await response.stdoutText;
+		// Store on window so step 3 can access it
+		(window as any).__cliResponse = response;
+	});
+
+	// Step 3: stdoutText
+	const output = await website.page.evaluate(async () => {
+		return await (window as any).__cliResponse.stdoutText;
 	});
 
 	await expect(output).toContain('hi!');
