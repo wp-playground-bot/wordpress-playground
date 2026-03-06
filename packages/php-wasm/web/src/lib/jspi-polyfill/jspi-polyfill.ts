@@ -133,11 +133,24 @@ function createSuspendingPolyfill() {
 /**
  * Wraps a function so that calling it returns a Promise
  * resolving to the original return value.
+ *
+ * Native JSPI's `WebAssembly.promising` always returns a
+ * Promise — even when the WASM function throws synchronously
+ * (e.g. PHP's `exit(0)` → Emscripten's `ExitStatus`). We
+ * must match that: catch synchronous throws and convert them
+ * to rejected Promises so that callers like Emscripten's
+ * `ccall({ async: true })` always receive a thenable.
  */
 function createPromisingPolyfill() {
 	return function promising<A extends any[], R>(
 		fn: (...args: A) => R
 	): (...args: A) => Promise<R> {
-		return (...args: A) => Promise.resolve(fn(...args));
+		return (...args: A) => {
+			try {
+				return Promise.resolve(fn(...args));
+			} catch (e) {
+				return Promise.reject(e);
+			}
+		};
 	};
 }

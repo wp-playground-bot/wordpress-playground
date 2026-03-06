@@ -86,6 +86,22 @@ describe('installJspiPolyfill', () => {
 
 		expect(await wrapped(1, 'hello', true)).toBe('1-hello-true');
 	});
+
+	it('promising wrapper converts synchronous throws to rejected Promises', async () => {
+		installJspiPolyfill();
+
+		const error = new Error('ExitStatus');
+		const fn = () => {
+			throw error;
+		};
+		const wrapped = (WebAssembly as any).promising(fn);
+
+		const result = wrapped();
+		// Must return a Promise (not throw synchronously),
+		// matching native WebAssembly.promising behavior.
+		expect(result).toBeInstanceOf(Promise);
+		await expect(result).rejects.toBe(error);
+	});
 });
 
 describe('uninstallJspiPolyfill', () => {
