@@ -267,7 +267,13 @@ export class TCPOverFetchWebsocket {
 				this.close();
 				break;
 			case 'tls':
-				this.fetchOverTLS();
+				this.fetchOverTLS().catch((err) => {
+					// eslint-disable-next-line no-console
+					console.error(
+						'[TCPOverFetchWebsocket] fetchOverTLS failed:',
+						err
+					);
+				});
 				this.fetchInitiated = true;
 				break;
 			case 'http':

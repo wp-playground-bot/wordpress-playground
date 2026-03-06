@@ -59,16 +59,38 @@ export class MainThreadSocketManager {
 		maxSize: number
 	): Promise<Uint8Array> {
 		const entry = this.sockets.get(socketId);
-		if (!entry) return new Uint8Array(0);
+		if (!entry) {
+			// eslint-disable-next-line no-console
+			console.warn(
+				'[SocketManager] recvFromSocket: no entry for',
+				socketId
+			);
+			return new Uint8Array(0);
+		}
 
 		if (entry.buffered.length > 0) {
 			return consumeBuffer(entry, maxSize);
 		}
 
+		// eslint-disable-next-line no-console
+		console.log(
+			'[SocketManager] recvFromSocket: waiting for data on',
+			socketId
+		);
+		const start = Date.now();
 		const result = await Promise.race([
 			entry.reader.read(),
 			timeout(RECV_TIMEOUT_MS),
 		]);
+		// eslint-disable-next-line no-console
+		console.log(
+			'[SocketManager] recvFromSocket: got result after',
+			Date.now() - start,
+			'ms, done=',
+			result.done,
+			'bytes=',
+			result.value?.length ?? 0
+		);
 
 		if (result.done || !result.value) {
 			return new Uint8Array(0);

@@ -212,6 +212,16 @@ function patchAsyncImports(
 	const env = info['env'] as Record<string, unknown> | undefined;
 	if (!env) return;
 
+	// eslint-disable-next-line no-console
+	console.log('[JSPI polyfill] patchAsyncImports called', {
+		hasRecvFrom: typeof env['__syscall_recvfrom'] === 'function',
+		hasConnect: typeof env['__syscall_connect'] === 'function',
+		hasPollSocket: typeof env['__asyncjs__wasm_poll_socket'] === 'function',
+		hasOnMessage:
+			typeof env['__asyncjs__js_module_onMessage'] === 'function',
+		hasSleep: typeof env['emscripten_sleep'] === 'function',
+	});
+
 	// Remove the Suspending polyfill now that
 	// instrumentWasmImports has already used it. Functions
 	// like _wasm_connect check 'Suspending' in WebAssembly
