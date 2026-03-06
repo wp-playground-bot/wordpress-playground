@@ -325,6 +325,28 @@ function patchAsyncImports(
 		wasi['fd_sync'] = () => 0;
 	}
 
+	// fd_read: WASI read. PHP's file_get_contents uses
+	// read() → fd_read → FS.read() → SOCKFS recvmsg,
+	// which reads from sock.recv_queue. That queue is
+	// always empty for our PolyfillProxyWebSocket because
+	// onmessage events never fire. Intercept reads on
+	// polyfilled socket FDs and use sync XHR instead.
+	if (wasi && typeof wasi['fd_read'] === 'function') {
+		const originalFdRead = wasi['fd_read'] as (...args: number[]) => number;
+		wasi['fd_read'] = (
+			fd: number,
+			iov: number,
+			iovcnt: number,
+			pnum: number
+		): number => {
+			const socketId = PolyfillProxyWebSocket.sockfdToSocketId.get(fd);
+			if (socketId === undefined) {
+				return originalFdRead(fd, iov, iovcnt, pnum);
+			}
+			return polyfillFdRead(wasmRefs, socketId, iov, iovcnt, pnum);
+		};
+	}
+
 	// wasm_poll_socket: EM_ASYNC_JS function used by
 	// __wrap_select and php_pollfd_for to wait for socket
 	// events. Return 1 immediately — the actual blocking
@@ -485,6 +507,37 @@ function recvFromBuffer(
 	}
 
 	return result;
+}
+
+/**
+ * WASI fd_read replacement for polyfilled socket FDs.
+ * Reads from the service worker via sync XHR, filling
+ * the iov scatter/gather buffers.
+ */
+function polyfillFdRead(
+	wasmRefs: WasmRefs,
+	socketId: number,
+	iov: number,
+	iovcnt: number,
+	pnum: number
+): number {
+	const view = new DataView(wasmRefs.memory!.buffer);
+	let totalRead = 0;
+
+	for (let i = 0; i < iovcnt; i++) {
+		const ptr = view.getUint32(iov + i * 8, true);
+		const len = view.getUint32(iov + i * 8 + 4, true);
+
+		const data = recvFromBuffer(socketId, len, 0);
+		if (data.length > 0) {
+			new Uint8Array(wasmRefs.memory!.buffer).set(data, ptr);
+			totalRead += data.length;
+		}
+		if (data.length < len) break;
+	}
+
+	view.setUint32(pnum, totalRead, true);
+	return 0;
 }
 
 /**
