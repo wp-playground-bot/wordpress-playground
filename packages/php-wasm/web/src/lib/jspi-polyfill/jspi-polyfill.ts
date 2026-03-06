@@ -49,16 +49,18 @@ export async function needsJspiPolyfill(): Promise<boolean> {
  *   is wrapped in `Promise.resolve()`.
  */
 export function installJspiPolyfill(): void {
-	if (polyfillInstalled) {
-		return;
+	if (!polyfillInstalled) {
+		saveOriginals();
+		polyfillInstalled = true;
 	}
 
-	saveOriginals();
-
+	// Always (re-)install both polyfills. patchAsyncImports()
+	// deletes Suspending after each WASM instantiation so
+	// that runtime code (e.g. _wasm_connect) takes sync
+	// paths. A subsequent instantiation (runtime rotation)
+	// needs Suspending again for instrumentWasmImports().
 	(WebAssembly as any).Suspending = createSuspendingPolyfill();
 	(WebAssembly as any).promising = createPromisingPolyfill();
-
-	polyfillInstalled = true;
 }
 
 /**

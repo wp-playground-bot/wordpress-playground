@@ -71,11 +71,31 @@ describe('installJspiPolyfill', () => {
 
 	it('is idempotent — calling twice does not error', () => {
 		installJspiPolyfill();
-		const suspending = (WebAssembly as any).Suspending;
-
 		installJspiPolyfill();
-		// Should still be the same polyfill, not doubly wrapped.
-		expect((WebAssembly as any).Suspending).toBe(suspending);
+
+		// Polyfills are still functional after double install.
+		expect((WebAssembly as any).Suspending).toBeDefined();
+		expect((WebAssembly as any).promising).toBeDefined();
+	});
+
+	it('re-installs Suspending after deletion (runtime rotation)', () => {
+		installJspiPolyfill();
+		expect((WebAssembly as any).Suspending).toBeDefined();
+
+		// patchAsyncImports() deletes Suspending after each
+		// WASM instantiation. Simulate that here.
+		delete (WebAssembly as any).Suspending;
+		expect((WebAssembly as any).Suspending).toBeUndefined();
+
+		// A subsequent installJspiPolyfill() call (from the
+		// next loadWebRuntime during rotation) must restore it.
+		installJspiPolyfill();
+		expect((WebAssembly as any).Suspending).toBeDefined();
+
+		// Verify it still works as identity.
+		const fn = () => 42;
+		const result = new (WebAssembly as any).Suspending(fn);
+		expect(result).toBe(fn);
 	});
 
 	it('promising wrapper passes all arguments through', async () => {
