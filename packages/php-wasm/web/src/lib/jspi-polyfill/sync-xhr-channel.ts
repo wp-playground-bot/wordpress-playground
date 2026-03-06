@@ -36,25 +36,11 @@ export function sendSyncXhr(
 	xhr.open('POST', url, false);
 	xhr.responseType = 'arraybuffer';
 
-	const start = Date.now();
 	if (body) {
 		xhr.send(body);
 	} else {
 		xhr.send();
 	}
-	const elapsed = Date.now() - start;
-
-	// eslint-disable-next-line no-console
-	console.log(
-		'[syncXhr]',
-		path,
-		'status=',
-		xhr.status,
-		'bytes=',
-		xhr.response?.byteLength ?? 0,
-		'ms=',
-		elapsed
-	);
 
 	if (xhr.status >= 200 && xhr.status < 300) {
 		const buffer = xhr.response as ArrayBuffer;

@@ -27,11 +27,6 @@ let corsProxyUrl: string | undefined;
 export function initJspiHandler(
 	tcpOverFetchOptions?: TCPOverFetchOptions
 ): void {
-	// eslint-disable-next-line no-console
-	console.log('[JSPI SW handler] initJspiHandler called', {
-		hasOptions: !!tcpOverFetchOptions,
-		hasCAroot: !!tcpOverFetchOptions?.CAroot,
-	});
 	if (tcpOverFetchOptions) {
 		socketManager = new MainThreadSocketManager(tcpOverFetchOptions);
 		corsProxyUrl = tcpOverFetchOptions.corsProxyUrl;
@@ -56,12 +51,6 @@ export async function handleJspiRequest(
 ): Promise<Response> {
 	const op = url.pathname.slice(JSPI_PATH_PREFIX.length);
 	const params = url.searchParams;
-
-	// eslint-disable-next-line no-console
-	console.log('[JSPI SW handler]', op, {
-		hasSocketManager: !!socketManager,
-		params: Object.fromEntries(params.entries()),
-	});
 
 	try {
 		switch (op) {

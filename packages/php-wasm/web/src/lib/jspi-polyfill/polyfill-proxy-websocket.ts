@@ -30,6 +30,17 @@ export class PolyfillProxyWebSocket {
 	static lastCreatedSocketId = 0;
 
 	readonly socketId: number;
+
+	// WebSocket readyState constants. SOCKFS checks
+	// dest.socket.readyState === dest.socket.OPEN etc.
+	// to decide whether to send data immediately or queue
+	// it. Without these, the comparisons fail and all data
+	// gets stuck in msg_send_queue.
+	readonly CONNECTING = 0;
+	readonly OPEN = 1;
+	readonly CLOSING = 2;
+	readonly CLOSED = 3;
+
 	readyState = 0; // CONNECTING
 	binaryType = 'arraybuffer';
 

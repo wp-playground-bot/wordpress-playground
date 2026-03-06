@@ -130,22 +130,7 @@ export async function bootPlaygroundRemote() {
 	// so we relay through the main thread.
 	worker.addEventListener('message', (event: MessageEvent) => {
 		if (event.data?.type === 'jspi-polyfill-options') {
-			const hasController = !!navigator.serviceWorker.controller;
-			// eslint-disable-next-line no-console
-			console.log(
-				'[boot] forwarding jspi-polyfill-options to SW, hasController=',
-				hasController,
-				'hasCAroot=',
-				!!event.data.tcpOverFetchOptions?.CAroot
-			);
-			if (hasController) {
-				navigator.serviceWorker.controller.postMessage(event.data);
-			} else {
-				// eslint-disable-next-line no-console
-				console.error(
-					'[boot] SW controller is null! Options not forwarded.'
-				);
-			}
+			navigator.serviceWorker.controller?.postMessage(event.data);
 		}
 	});
 
